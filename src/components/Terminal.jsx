@@ -1,0 +1,304 @@
+import { useState, useRef, useEffect } from 'react'
+import { processCommand, getCwd, getHistory, getPrompt, saveFile, verifyPassword, performAuthAction } from '../utils/commands'
+
+const WELCOME = `Welcome to ASIF Linux Terminal v1.0
+Type 'help' for available commands, 'man <cmd>' for manual pages.
+─────────────────────────────────────────────────────────`
+
+function renderText(text) {
+    // Simple ANSI color parsing
+    return text
+        .replace(/\x1b\[1;34m(.*?)\x1b\[0m/g, '<span style="color:#58a6ff;font-weight:bold">$1</span>')
+        .replace(/\x1b\[1;32m(.*?)\x1b\[0m/g, '<span style="color:#00ff88;font-weight:bold">$1</span>')
+        .replace(/\x1b\[7m(.*?)\x1b\[0m/g, '<span style="background:#e6edf3;color:#0a0e14">$1</span>')
+}
+
+export default function Terminal() {
+    const [lines, setLines] = useState([{ text: WELCOME, type: 'info' }])
+    const [input, setInput] = useState('')
+    const [historyIdx, setHistoryIdx] = useState(-1)
+    const [nano, setNano] = useState({ open: false, content: '', path: '', message: '' })
+    const [passwordMode, setPasswordMode] = useState(false)
+    const [pendingCmd, setPendingCmd] = useState(null)
+    const [animationType, setAnimationType] = useState(null)
+    const bodyRef = useRef(null)
+    const inputRef = useRef(null)
+    const nanoRef = useRef(null)
+
+    useEffect(() => {
+        if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+    }, [lines])
+
+    useEffect(() => {
+        inputRef.current?.focus()
+    }, [])
+
+    const focusInput = () => inputRef.current?.focus()
+
+    const handleSubmit = (e) => {
+        e.preventDefault()
+
+        if (passwordMode) {
+            if (verifyPassword(input)) {
+                const newLines = [...lines, { text: '', type: 'output' }]
+                let results = []
+                if (pendingCmd) {
+                    const { context, cmd } = pendingCmd
+                    results = performAuthAction(context, cmd)
+                }
+
+                for (const result of results) {
+                    if (result.output === '__CLEAR__') {
+                        setLines([])
+                        setInput('')
+                        setHistoryIdx(-1)
+                        setPasswordMode(false)
+                        setPendingCmd(null)
+                        return
+                    }
+                    if (result.output) {
+                        newLines.push({ text: result.output, type: result.type })
+                    }
+                }
+                setLines(newLines)
+                setPasswordMode(false)
+                setPendingCmd(null)
+            } else {
+                setLines(prev => [...prev, { text: 'Sorry, try again.', type: 'error' }])
+                setPasswordMode(false)
+                setPendingCmd(null)
+            }
+            setInput('')
+            return
+        }
+
+        const cmd = input.trim()
+        const prompt = getPrompt()
+        const promptSymbol = prompt.user === 'root' ? '#' : '$'
+        const promptStr = `${prompt.user}@${prompt.host}:${prompt.path}${promptSymbol}`
+
+        const newLines = [...lines, { text: `${promptStr} ${cmd}`, type: 'prompt-line' }]
+
+        if (cmd) {
+            const results = processCommand(cmd)
+            for (const result of results) {
+                if (result.output === '__CLEAR__') {
+                    setLines([])
+                    setInput('')
+                    setHistoryIdx(-1)
+                    return
+                }
+                if (result.output === '__LOGOUT__') {
+                    sessionStorage.removeItem('asif_terminal_auth')
+                    window.location.reload()
+                    return
+                }
+                if (result.output === '__NANO__') {
+                    setNano({ open: true, content: result.data.content, path: result.data.path, displayPath: result.data.displayPath, message: '' })
+                    setTimeout(() => nanoRef.current?.focus(), 100)
+                    return
+                }
+                if (result.output === '__REBOOT__') {
+                    setAnimationType('reboot')
+                    setTimeout(() => window.location.reload(), 3000)
+                    return
+                }
+                if (result.output === '__SHUTDOWN__') {
+                    setAnimationType('shutdown')
+                    setTimeout(() => {
+                        sessionStorage.removeItem('asif_terminal_auth')
+                        window.location.reload()
+                    }, 3000)
+                    return
+                }
+                if (result.type === 'password-request') {
+                    setPasswordMode(true)
+                    setPendingCmd(result.data)
+                    setLines(prev => [...prev, { text: result.output, type: 'prompt-line' }])
+                    setInput('')
+                    return
+                }
+                if (result.output) {
+                    newLines.push({ text: result.output, type: result.type })
+                }
+            }
+        }
+
+        setLines(newLines)
+        setInput('')
+        setHistoryIdx(-1)
+    }
+
+    const handleKeyDown = (e) => {
+        const hist = getHistory()
+        if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            const newIdx = historyIdx < hist.length - 1 ? historyIdx + 1 : historyIdx
+            setHistoryIdx(newIdx)
+            if (hist.length > 0) setInput(hist[hist.length - 1 - newIdx] || '')
+        } else if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            const newIdx = historyIdx > 0 ? historyIdx - 1 : -1
+            setHistoryIdx(newIdx)
+            setInput(newIdx >= 0 ? hist[hist.length - 1 - newIdx] : '')
+        } else if (e.key === 'Tab') {
+            e.preventDefault()
+            const cmds = ['ls', 'cd', 'pwd', 'mkdir', 'rmdir', 'touch', 'rm', 'cat', 'echo', 'cp', 'mv', 'head', 'tail', 'wc', 'grep', 'find', 'sort', 'uniq', 'cut', 'diff', 'chmod', 'chown', 'ln', 'whoami', 'hostname', 'uname', 'date', 'cal', 'uptime', 'free', 'df', 'du', 'ps', 'top', 'kill', 'ping', 'ifconfig', 'ip', 'curl', 'wget', 'netstat', 'tree', 'file', 'stat', 'which', 'whereis', 'env', 'export', 'alias', 'history', 'clear', 'man', 'help', 'tar', 'zip', 'unzip', 'apt', 'sudo', 'neofetch', 'ssh', 'lsblk', 'mount', 'w', 'who', 'last', 'dmesg', 'systemctl', 'nslookup', 'traceroute', 'reboot', 'shutdown']
+            const matches = cmds.filter(c => c.startsWith(input))
+            if (matches.length === 1) setInput(matches[0] + ' ')
+            else if (matches.length > 1) {
+                const prompt = getPrompt()
+                setLines(prev => [...prev,
+                { text: `${prompt.user}@${prompt.host}:${prompt.path}$ ${input}`, type: 'prompt-line' },
+                { text: matches.join('  '), type: 'info' }
+                ])
+            }
+        } else if (e.ctrlKey && e.key === 'l') {
+            e.preventDefault()
+            setLines([])
+        } else if (e.ctrlKey && e.key === 'c') {
+            e.preventDefault()
+            const prompt = getPrompt()
+            const promptSymbol = prompt.user === 'root' ? '#' : '$'
+
+            if (prompt.user === 'root' && input.trim() === '') {
+                const results = processCommand('exit')
+                setLines(prev => [...prev,
+                { text: `${prompt.user}@${prompt.host}:${prompt.path}${promptSymbol} ^C`, type: 'prompt-line' },
+                { text: 'logout', type: 'output' }
+                ])
+                setInput('')
+                return
+            }
+
+            setLines(prev => [...prev, { text: `${prompt.user}@${prompt.host}:${prompt.path}${promptSymbol} ${input}^C`, type: 'prompt-line' }])
+            setInput('')
+        }
+    }
+
+    const handleNanoKeyDown = (e) => {
+        if (e.ctrlKey) {
+            e.preventDefault()
+            if (e.key === 'o') {
+                saveFile(nano.path, nano.content)
+                setNano(prev => ({ ...prev, message: `[ Wrote ${nano.content.length} characters ]` }))
+                setTimeout(() => setNano(prev => ({ ...prev, message: '' })), 2000)
+            } else if (e.key === 'x') {
+                setNano({ open: false, content: '', path: '', message: '' })
+                setLines(prev => [...prev, { text: '', type: 'output' }])
+                setTimeout(() => inputRef.current?.focus(), 100)
+            }
+        }
+    }
+
+    const handleClear = () => setLines([])
+
+    const prompt = getPrompt()
+
+    if (nano.open) {
+        return (
+            <div className="terminal-container">
+                <div className="nano-container">
+                    <div className="nano-header">
+                        <span>GNU nano 7.2</span>
+                        <span className="nano-filename">{nano.displayPath}</span>
+                        <span>Modified</span>
+                    </div>
+                    <div className="nano-body">
+                        <textarea
+                            ref={nanoRef}
+                            className="nano-textarea"
+                            value={nano.content}
+                            onChange={e => setNano(prev => ({ ...prev, content: e.target.value }))}
+                            onKeyDown={handleNanoKeyDown}
+                            spellCheck={false}
+                        />
+                    </div>
+                    <div className="nano-footer">
+                        <div className={`nano-message ${nano.message ? 'visible' : ''}`}>
+                            {nano.message}
+                        </div>
+                        <div className="nano-shortcuts">
+                            <div className="shortcut-item"><span className="shortcut-key">^G</span> Get Help</div>
+                            <div className="shortcut-item"><span className="shortcut-key">^O</span> Write Out</div>
+                            <div className="shortcut-item"><span className="shortcut-key">^W</span> Where Is</div>
+                            <div className="shortcut-item"><span className="shortcut-key">^K</span> Cut Text</div>
+                            <div className="shortcut-item"><span className="shortcut-key">^J</span> Justify</div>
+                            <div className="shortcut-item"><span className="shortcut-key">^C</span> Cur Pos</div>
+                            <div className="shortcut-item"><span className="shortcut-key">^X</span> Exit</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )
+    }
+
+    return (
+        <div className="terminal-container" onClick={focusInput}>
+            <div className="terminal-header">
+                <div className="terminal-tabs">
+                    <div className="terminal-tab active">
+                        <span className="tab-dot" />
+                        bash — {getCwd().replace('/home/asif', '~')}
+                    </div>
+                </div>
+                <div className="terminal-actions">
+                    <button className="terminal-action-btn" onClick={handleClear}>Clear</button>
+                    <button className="terminal-action-btn" onClick={() => setLines([{ text: WELCOME, type: 'info' }])}>Reset</button>
+                </div>
+            </div>
+            <div className="terminal-body" ref={bodyRef}>
+                {lines.map((line, idx) => (
+                    <div key={idx} className={`terminal-line ${line.type}`}>
+                        <span dangerouslySetInnerHTML={{ __html: renderText(line.text) }} />
+                    </div>
+                ))}
+                <form className="terminal-input-wrapper" onSubmit={handleSubmit}>
+                    <span className="terminal-prompt">
+                        {passwordMode ? (
+                            'Password:'
+                        ) : (
+                            <>
+                                <span className="user">{prompt.user}</span>
+                                <span className="separator">@</span>
+                                <span className="user">{prompt.host}</span>
+                                <span className="separator">:</span>
+                                <span className="path">{prompt.path}</span>
+                                <span className="dollar">{prompt.user === 'root' ? '#' : '$'}</span>
+                            </>
+                        )}
+                    </span>
+                    <input
+                        ref={inputRef}
+                        type={passwordMode ? "password" : "text"}
+                        className="terminal-input"
+                        value={input}
+                        onChange={e => setInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        spellCheck={false}
+                        autoComplete="off"
+                    />
+                </form>
+            </div>
+            {animationType && (
+                <div className={`system-animation ${animationType}`}>
+                    <div className="animation-content">
+                        {animationType === 'reboot' ? (
+                            <>
+                                <div className="spinner"></div>
+                                <h2>Rebooting System...</h2>
+                                <p>Please wait while the system restarts</p>
+                            </>
+                        ) : (
+                            <>
+                                <div className="shutdown-icon">⏻</div>
+                                <h2>Shutting Down...</h2>
+                                <p>System is powering off</p>
+                            </>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    )
+}
